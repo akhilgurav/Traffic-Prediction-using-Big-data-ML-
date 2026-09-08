@@ -1,0 +1,18 @@
+apiVersion: 1
+
+# EDIT ME: replace the placeholder webhook URL below with a real endpoint
+# (Slack incoming webhook, PagerDuty, Discord, a custom endpoint, etc.),
+# or delete this receiver and add your own contact point type (e.g. "email",
+# which needs SMTP configured via GF_SMTP_* env vars on the grafana service
+# in docker-compose.yml). Until this is edited, alerts will fire in Grafana's
+# UI (Alerting > Alert rules) but won't actually be delivered anywhere.
+contactPoints:
+  - orgId: 1
+    name: traffic-alerts
+    receivers:
+      - uid: traffic-alerts-webhook
+        type: webhook
+        settings:
+          url: https://example.com/replace-with-your-webhook-url
+          httpMethod: POST
+        disableResolveMessage: false

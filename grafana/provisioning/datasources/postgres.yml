@@ -1,0 +1,21 @@
+apiVersion: 1
+
+# NOTE: hardcoded to the docker-compose defaults (traffic_user/traffic_pass/
+# traffic_db). If you changed POSTGRES_USER/PASSWORD/DB in your .env away
+# from the defaults, update the three fields below to match.
+datasources:
+  - name: PuneTrafficPostgres
+    uid: pune_traffic_postgres
+    type: postgres
+    access: proxy
+    url: postgres:5432
+    database: traffic_db
+    user: traffic_user
+    secureJsonData:
+      password: traffic_pass
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: false
+    isDefault: true
+    editable: true

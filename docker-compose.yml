@@ -1,0 +1,275 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: traffic_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-traffic_db}
+      POSTGRES_USER: ${POSTGRES_USER:-traffic_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-traffic_pass}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      # Anything in docker-entrypoint-initdb.d runs automatically ONLY on
+      # first container creation (empty data dir) — this seeds the schema.
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-traffic_user} -d ${POSTGRES_DB:-traffic_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  collector:
+    build: .
+    container_name: traffic_collector
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      TOMTOM_API_KEY: ${TOMTOM_API_KEY}
+      OPENWEATHER_API_KEY: ${OPENWEATHER_API_KEY}
+      POSTGRES_DSN: postgresql://${POSTGRES_USER:-traffic_user}:${POSTGRES_PASSWORD:-traffic_pass}@postgres:5432/${POSTGRES_DB:-traffic_db}
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-45}
+      RAW_JSON_DIR: /app/data/raw_json
+      PARQUET_DIR: /app/data/parquet
+      KAFKA_ENABLED: ${KAFKA_ENABLED:-true}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-traffic-snapshots}
+    volumes:
+      - ./data:/app/data
+    command: ["python", "collector_main.py"]
+
+  exporter:
+    build: .
+    container_name: traffic_exporter
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_DSN: postgresql://${POSTGRES_USER:-traffic_user}:${POSTGRES_PASSWORD:-traffic_pass}@postgres:5432/${POSTGRES_DB:-traffic_db}
+      PARQUET_DIR: /app/data/parquet
+      EXPORT_INTERVAL_SECONDS: ${EXPORT_INTERVAL_SECONDS:-86400}
+    volumes:
+      - ./data:/app/data
+    command: ["python", "-m", "scripts.export_loop"]
+
+  # --- HDFS: raw-backup + historical dataset branch (see architecture diagram) ---
+  # Starts only with: docker compose --profile hdfs up -d namenode datanode hdfs-sync
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: traffic_hdfs_namenode
+    restart: unless-stopped
+    environment:
+      CLUSTER_NAME: pune-traffic-hdfs
+      CORE_CONF_fs_defaultFS: hdfs://namenode:8020
+    ports:
+      - "9870:9870"   # HDFS web UI  (http://localhost:9870)
+      - "8020:8020"   # RPC endpoint used by clients (fs.defaultFS)
+    volumes:
+      - hdfs_namenode:/hadoop/dfs/name
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9870 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+    profiles:
+      - hdfs
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: traffic_hdfs_datanode
+    restart: unless-stopped
+    environment:
+      CORE_CONF_fs_defaultFS: hdfs://namenode:8020
+      SERVICE_PRECONDITION: "namenode:9870"
+    depends_on:
+      namenode:
+        condition: service_healthy
+    ports:
+      - "9864:9864"   # datanode web UI
+    volumes:
+      - hdfs_datanode:/hadoop/dfs/data
+    profiles:
+      - hdfs
+
+  # Periodically mirrors data/raw_json (and data/parquet) into HDFS, matching
+  # the "HDFS (Raw Backup)" branch of the architecture diagram. Local files
+  # stay the source of truth for every other service — this is additive,
+  # exactly like the Kafka publish path: if it fails or HDFS isn't running,
+  # nothing else in the pipeline is affected.
+  hdfs-sync:
+    build: .
+    container_name: traffic_hdfs_sync
+    restart: unless-stopped
+    depends_on:
+      namenode:
+        condition: service_healthy
+      datanode:
+        condition: service_started
+    environment:
+      HDFS_ENABLED: "true"
+      HDFS_URL: http://namenode:9870
+      HDFS_USER: root
+      HDFS_RAW_PATH: /traffic/raw_json
+      HDFS_PARQUET_PATH: /traffic/parquet
+      RAW_JSON_DIR: /app/data/raw_json
+      PARQUET_DIR: /app/data/parquet
+      HDFS_SYNC_INTERVAL_SECONDS: ${HDFS_SYNC_INTERVAL_SECONDS:-3600}
+    volumes:
+      - ./data:/app/data
+    command: ["python", "-m", "scripts.hdfs_sync_loop"]
+    profiles:
+      - hdfs
+
+  # --- Phase 5 prep: Kafka, not needed until real-time streaming ---
+  # Starts only with: docker compose --profile kafka up
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: traffic_zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    profiles:
+      - kafka
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: traffic_kafka
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    ports:
+      - "29092:29092"   # host-accessible port, for Spark running outside compose
+    profiles:
+      - kafka
+
+  # Phase 2: run Spark feature engineering on demand
+  # docker compose --profile spark run --rm spark spark-submit /app/spark_jobs/feature_engineering.py
+  spark:
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
+    container_name: traffic_spark
+    user: root
+    working_dir: /app
+    volumes:
+      - ./:/app
+    environment:
+      PARQUET_DIR: /app/data/parquet
+      FEATURES_OUT_DIR: /app/data/features
+      LABELED_OUT_DIR: /app/data/labeled
+      MODEL_DIR: /app/data/models/congestion_rf
+    profiles:
+      - spark
+
+  # Phase 5b: long-running Structured Streaming job. Separate from the
+  # on-demand `spark` service above - this one stays up continuously.
+  # Start with: docker compose --profile kafka --profile streaming up -d spark-streaming
+  # (needs the `kafka` profile too, since it consumes from Kafka)
+  spark-streaming:
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
+    container_name: traffic_spark_streaming
+    restart: unless-stopped
+    user: root
+    working_dir: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./:/app
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-traffic-snapshots}
+      MODEL_DIR: /app/data/models/congestion_rf
+      CHECKPOINT_DIR: /app/data/checkpoints/streaming_predict
+      POSTGRES_JDBC_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-traffic_db}
+      POSTGRES_USER: ${POSTGRES_USER:-traffic_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-traffic_pass}
+    command: >
+      /opt/spark/bin/spark-submit
+      --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.postgresql:postgresql:42.7.3
+      /app/spark_jobs/streaming_predict.py
+    profiles:
+      - streaming
+
+  # Optional: browse the DB at http://localhost:5050 (docker compose --profile tools up)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: traffic_pgadmin
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@traffic.local}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    profiles:
+      - tools   # only starts with: docker compose --profile tools up
+
+  # Phase 5c dashboard #1: Streamlit (Python, auto-refreshing)
+  # Start with: docker compose --profile dashboard up -d dashboard
+  dashboard:
+    build: .
+    container_name: traffic_dashboard
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_DSN: postgresql://${POSTGRES_USER:-traffic_user}:${POSTGRES_PASSWORD:-traffic_pass}@postgres:5432/${POSTGRES_DB:-traffic_db}
+      DASHBOARD_REFRESH_SECONDS: ${DASHBOARD_REFRESH_SECONDS:-15}
+      METRICS_PATH: data/models/congestion_rf/metrics.json
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./dashboard:/app/dashboard
+      - ./data:/app/data:ro
+    command: ["streamlit", "run", "dashboard/app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    profiles:
+      - dashboard
+
+  # Phase 5c dashboard #2: Grafana (fully provisioned - datasource + dashboard
+  # load automatically on startup, no manual clicking through the UI needed)
+  # Start with: docker compose --profile dashboard up -d grafana
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: traffic_grafana
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    profiles:
+      - dashboard
+
+volumes:
+  pg_data:
+  pgadmin_data:
+  grafana_data:
+  hdfs_namenode:
+  hdfs_datanode:

@@ -1,0 +1,13 @@
+requests>=2.31.0
+psycopg2-binary>=2.9.9
+pandas>=2.2.0
+numpy>=1.26.0
+pyarrow>=15.0.0
+sqlalchemy>=2.0.0
+python-dotenv>=1.0.0
+kafka-python>=2.0.2
+hdfs>=2.7.3
+streamlit>=1.37.0
+streamlit-autorefresh>=1.0.1
+plotly>=5.22.0
+statsmodels>=0.14.0

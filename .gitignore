@@ -1,0 +1,59 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# IDE/editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and runtime files
+*.log
+logs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Spark / local state
+spark-warehouse/
+metastore_db/
+derby.log
+
+# Project data and generated outputs
+data/checkpoints/
+data/csv/
+data/features/
+data/labeled/
+data/models/
+data/parquet/
+data/raw_json/
+
+# Docker overrides
+docker-compose.override.yml

@@ -1,0 +1,12 @@
+FROM apache/spark:3.5.1-python3
+
+# pyspark.ml (used by Phase 4 training and Phase 5 streaming inference)
+# imports numpy under the hood, but the base image only ships plain PySpark.
+USER root
+RUN python3 -m pip install --no-cache-dir numpy pandas
+
+# The base image doesn't put $SPARK_HOME/bin on PATH, so plain
+# `spark-submit` (as opposed to the full /opt/spark/bin/spark-submit path)
+# fails with "exec: spark-submit: not found" on one-off `docker compose run`
+# invocations. Fix it here instead of requiring the full path every time.
+ENV PATH="/opt/spark/bin:${PATH}"

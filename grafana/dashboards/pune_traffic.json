@@ -1,0 +1,265 @@
+{
+  "title": "Pune Traffic - Live Congestion Predictions",
+  "uid": "pune-traffic-live",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "timezone": "utc",
+  "editable": true,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Latest prediction per location",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "pune_traffic_postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT DISTINCT ON (p.location_id) l.name AS location, p.collected_at, p.predicted_congestion_label AS label, ROUND(p.prob_low::numeric, 3) AS prob_low, ROUND(p.prob_moderate::numeric, 3) AS prob_moderate, ROUND(p.prob_high::numeric, 3) AS prob_high, ROUND(p.speed_ratio::numeric, 3) AS speed_ratio, p.delay FROM live_predictions p JOIN locations l ON l.location_id = p.location_id ORDER BY p.location_id, p.collected_at DESC",
+          "datasource": { "type": "postgres", "uid": "pune_traffic_postgres" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "label" },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "low": { "text": "LOW", "color": "green" },
+                      "moderate": { "text": "MODERATE", "color": "orange" },
+                      "high": { "text": "HIGH", "color": "red" }
+                    }
+                  }
+                ]
+              },
+              { "id": "custom.displayMode", "value": "color-background" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "title": "Probability of high congestion (last hour)",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "postgres", "uid": "pune_traffic_postgres" },
+      "fieldConfig": { "defaults": { "min": 0, "max": 1 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawSql": "SELECT p.collected_at AS time, l.name AS metric, p.prob_high FROM live_predictions p JOIN locations l ON l.location_id = p.location_id WHERE $__timeFilter(p.collected_at) ORDER BY 1",
+          "datasource": { "type": "postgres", "uid": "pune_traffic_postgres" }
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Speed ratio (last hour)",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "postgres", "uid": "pune_traffic_postgres" },
+      "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawSql": "SELECT p.collected_at AS time, l.name AS metric, p.speed_ratio FROM live_predictions p JOIN locations l ON l.location_id = p.location_id WHERE $__timeFilter(p.collected_at) ORDER BY 1",
+          "datasource": { "type": "postgres", "uid": "pune_traffic_postgres" }
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Live Congestion Map",
+      "type": "geomap",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 17 },
+      "datasource": { "type": "postgres", "uid": "pune_traffic_postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT DISTINCT ON (s.location_id) l.name AS location, l.lat, l.lon, s.current_speed / NULLIF(s.free_flow_speed,0) AS speed_ratio, s.current_speed, s.incident_count, s.road_closure FROM traffic_snapshots s JOIN locations l ON l.location_id = s.location_id ORDER BY s.location_id, s.collected_at DESC",
+          "datasource": { "type": "postgres", "uid": "pune_traffic_postgres" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "continuous-RdYlGr" }, "min": 0, "max": 1 },
+        "overrides": []
+      },
+      "options": {
+        "view": { "id": "fit" },
+        "basemap": { "type": "carto", "name": "Basemap", "config": { "theme": "dark" } },
+        "controls": { "showZoom": true, "showAttribution": true, "mouseWheelZoom": true },
+        "layers": [
+          {
+            "type": "markers",
+            "name": "Monitored roads",
+            "location": { "mode": "coords", "latitude": "lat", "longitude": "lon" },
+            "config": {
+              "style": {
+                "size": { "field": "incident_count", "fixed": 8, "min": 8, "max": 26 },
+                "color": { "field": "speed_ratio" },
+                "opacity": 0.9
+              }
+            },
+            "tooltip": true
+          }
+        ]
+      },
+      "description": "Point-per-location congestion map, colored by live speed ratio (red=congested, green=free-flow), sized by active incident count. For true road-segment polylines (not just points), see the Streamlit dashboard's Real-Time Monitoring page, which draws the actual TomTom road geometry."
+    },
+    {
+      "id": 5,
+      "title": "Roads congested now",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 27 },
+      "datasource": { "type": "postgres", "uid": "pune_traffic_postgres" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 3 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT COUNT(*) AS value FROM (SELECT DISTINCT ON (location_id) current_speed, free_flow_speed FROM traffic_snapshots ORDER BY location_id, collected_at DESC) t WHERE current_speed / NULLIF(free_flow_speed,0) < 0.4",
+          "datasource": { "type": "postgres", "uid": "pune_traffic_postgres" }
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Avg speed ratio (all roads)",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 27 },
+      "datasource": { "type": "postgres", "uid": "pune_traffic_postgres" },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0, "max": 1, "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 0.4 },
+              { "color": "green", "value": 0.7 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT AVG(current_speed / NULLIF(free_flow_speed,0)) AS value FROM (SELECT DISTINCT ON (location_id) current_speed, free_flow_speed FROM traffic_snapshots ORDER BY location_id, collected_at DESC) t",
+          "datasource": { "type": "postgres", "uid": "pune_traffic_postgres" }
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Current speed by location",
+      "type": "bargauge",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
+      "datasource": { "type": "postgres", "uid": "pune_traffic_postgres" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "velocitykmh", "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 15 },
+              { "color": "green", "value": 25 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "displayMode": "gradient", "orientation": "horizontal", "showUnfilled": true },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT DISTINCT ON (s.location_id) l.name AS location, s.current_speed FROM traffic_snapshots s JOIN locations l ON l.location_id = s.location_id ORDER BY s.location_id, s.collected_at DESC",
+          "datasource": { "type": "postgres", "uid": "pune_traffic_postgres" }
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Active incidents & closures",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 35 },
+      "datasource": { "type": "postgres", "uid": "pune_traffic_postgres" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT DISTINCT ON (s.location_id) l.name AS location, s.incident_count, s.incident_severity_max, s.road_closure, s.collected_at FROM traffic_snapshots s JOIN locations l ON l.location_id = s.location_id ORDER BY s.location_id, s.collected_at DESC",
+          "datasource": { "type": "postgres", "uid": "pune_traffic_postgres" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "road_closure" },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "true": { "text": "CLOSED", "color": "red" },
+                      "false": { "text": "open", "color": "green" }
+                    }
+                  }
+                ]
+              },
+              { "id": "custom.displayMode", "value": "color-background" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "incident_severity_max" },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "orange", "value": 2 },
+                    { "color": "red", "value": 3 }
+                  ]
+                }
+              },
+              { "id": "custom.displayMode", "value": "color-background" }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

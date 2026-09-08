@@ -1,0 +1,91 @@
+apiVersion: 1
+
+# Grafana unified alerting, provisioned as code. Files here are picked up
+# automatically (same ./grafana/provisioning volume mount already used for
+# the datasource and dashboard). The "Pune Traffic" folder is created
+# automatically if it doesn't exist yet.
+#
+# NOTE: these rules alert on the LATEST snapshot per location (via
+# DISTINCT ON), not a time-windowed aggregate - that's deliberate, since
+# a single stuck-at-red-light poll shouldn't page anyone. The `for: 5m`
+# on the congestion rule means speed_ratio has to stay below threshold
+# across several poll cycles before it actually fires.
+groups:
+  - orgId: 1
+    name: pune-traffic-alerts
+    folder: Pune Traffic
+    interval: 1m
+    rules:
+      - uid: pune-high-congestion
+        title: High congestion detected
+        condition: C
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.location }} speed ratio has dropped below 0.4 (congested)"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: pune_traffic_postgres
+            model:
+              rawSql: >-
+                SELECT DISTINCT ON (s.location_id)
+                  l.name AS location,
+                  s.current_speed / NULLIF(s.free_flow_speed, 0) AS speed_ratio
+                FROM traffic_snapshots s
+                JOIN locations l ON l.location_id = s.location_id
+                ORDER BY s.location_id, s.collected_at DESC
+              format: table
+              rawQuery: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+              field: speed_ratio
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: lt, params: [0.4] }
+
+      - uid: pune-road-closure
+        title: Road closure detected
+        condition: C
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "One or more monitored roads are reporting a closure"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: pune_traffic_postgres
+            model:
+              rawSql: >-
+                SELECT COUNT(*) AS closures FROM (
+                  SELECT DISTINCT ON (location_id) road_closure
+                  FROM traffic_snapshots
+                  ORDER BY location_id, collected_at DESC
+                ) t
+                WHERE road_closure = true
+              format: table
+              rawQuery: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+              field: closures
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [0] }
